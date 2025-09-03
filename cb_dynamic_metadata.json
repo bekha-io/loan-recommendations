@@ -1,0 +1,21 @@
+{
+  "model_name": "cb_dynamic",
+  "feature_names": [
+    "age",
+    "credit_history_count",
+    "dependents",
+    "gender",
+    "education",
+    "marital_status",
+    "district"
+  ],
+  "cat_features": [
+    "gender",
+    "education",
+    "marital_status",
+    "district"
+  ],
+  "auc": 0.6375428816466552,
+  "framework": "catboost",
+  "source": "Attempt2.ipynb"
+}
