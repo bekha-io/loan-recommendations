@@ -1,131 +1,15 @@
 import os
-import io
-import hashlib
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from typing import Tuple, List, Optional
 from catboost import CatBoostClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
 
 
 APP_TITLE = "Динамическое ценообразование: PD → ставка"
-DEFAULT_DATA_PATH = os.path.join(os.path.dirname(__file__), "loan_applications.csv")
 
 
-def _df_fingerprint(df: pd.DataFrame) -> str:
-    sample = df.head(1000).to_csv(index=False).encode("utf-8", errors="ignore")
-    return hashlib.md5(sample).hexdigest()
-
-
-def clean_and_prepare_loans(df: pd.DataFrame) -> pd.DataFrame:
-    loans = df[df["status"].isin(["reimbursed", "issued"])].copy()
-    if "id" in loans.columns:
-        loans = loans.drop_duplicates(subset=["id"])
-
-    # Бизнес-правило: дефолт, если просрочка > 10 дней
-    if "overdue_days" in loans.columns:
-        loans["is_bad"] = loans["overdue_days"] > 10
-    else:
-        raise ValueError("В наборе данных отсутствует столбец 'overdue_days'.")
-
-    # Удаляем старый канал
-    if "source" in loans.columns:
-        loans = loans[~loans["source"].isin(["online-old"])]
-
-    # Удаляем нерелевантные столбцы, как в ноутбуке
-    cols_to_drop = [
-        "overdue_days",
-        "status",
-        "client_id",
-        "id",
-        "loan_given_duration",
-        "loan_given_amount",
-        "monthly_income_usd",
-        "created_at",
-        "updated_at",
-        "source",
-        "exported_at",
-        "otp_is_verified",
-        "otp_verified_at",
-        "is_overdue",
-        "partner_specific",
-        "input",
-        "deleted_at",
-        "is_deleted",
-        "threshold",
-        "scoring_is_approved",
-        "prediction",
-        "contract_num",
-        "remaining_principal_amount",
-        "currency",
-        "created_by_admin_id",
-        "prediction-2",
-        "credit_history_report_id",
-        "partner_id",
-        "is_client_bad_borrower",
-    ]
-    loans = loans.drop(columns=[c for c in cols_to_drop if c in loans.columns], errors="ignore")
-
-    # Нормализация district, как в ноутбуке
-    if "district" in loans.columns:
-        loans["district"] = loans["district"].replace(["Hissar"], "Hissor")
-        loans["district"] = loans["district"].replace(["Tursunzade"], "Tursunzoda")
-        loans["district"] = loans["district"].replace(["Vahdat"], "Vakhdat")
-        loans["district"] = loans["district"].replace(["Unknown", np.nan], "Dushanbe")
-
-    return loans
-
-
-def train_dynamic_model(loans: pd.DataFrame) -> Tuple[CatBoostClassifier, List[str], List[str], float]:
-    # Удаляем сумму и срок клиента, чтобы модель PD не зависела от них
-    dynamic = loans.copy()
-    for c in ["client_loan_amount", "client_loan_duration"]:
-        if c in dynamic.columns:
-            dynamic = dynamic.drop(columns=[c])
-
-    if "is_bad" not in dynamic.columns:
-        raise ValueError("В данных отсутствует столбец 'is_bad' после подготовки.")
-
-    X = dynamic.drop(columns=["is_bad"])  # признаки
-    y = dynamic["is_bad"].astype(int)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, stratify=y, test_size=0.2, random_state=42
-    )
-
-    cat_features = [col for col in X.columns if X[col].dtype == "object"]
-
-    model = CatBoostClassifier(
-        iterations=1000,
-        learning_rate=0.01,
-        depth=10,
-        custom_metric=["AUC"],
-        cat_features=cat_features,
-        use_best_model=True,
-        verbose=False,
-        early_stopping_rounds=50,
-    )
-    model.fit(X_train, y_train, eval_set=(X_test, y_test), verbose=False)
-
-    y_pred_test = model.predict_proba(X_test)[:, 1]
-    auc = float(roc_auc_score(y_test, y_pred_test))
-
-    return model, cat_features, list(X.columns), auc
-
-
-@st.cache_data(show_spinner=False)
-def load_dataframe_from_bytes(content: bytes) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(content), low_memory=False)
-
-
-@st.cache_data(show_spinner=False)
-def load_default_dataframe(path: str) -> Optional[pd.DataFrame]:
-    if os.path.exists(path):
-        return pd.read_csv(path, low_memory=False)
-    return None
+# Убрали загрузку/предпросмотр данных и любое обучение в приложении
 
 
 @st.cache_resource(show_spinner=True)
@@ -152,25 +36,6 @@ def compute_rate(pd_value: float, r_funds: float, lgd: float, rr: float, pricing
     return float(r_funds + expected_loss / (1.0 - rr) + pricing_spread)
 
 
-def ui_sidebar_data() -> pd.DataFrame:
-    st.sidebar.header("Данные для обучения")
-    df: Optional[pd.DataFrame] = None
-
-    if os.path.exists(DEFAULT_DATA_PATH):
-        st.sidebar.info("Найден локальный файл loan_applications.csv — будет использован по умолчанию.")
-        df = load_default_dataframe(DEFAULT_DATA_PATH)
-
-    uploaded = st.sidebar.file_uploader("Или загрузите CSV с заявками", type=["csv"])
-    if uploaded is not None:
-        content = uploaded.read()
-        df = load_dataframe_from_bytes(content)
-
-    if df is None:
-        st.sidebar.warning("Нет данных: поместите loan_applications.csv рядом с приложением или загрузите CSV.")
-
-    return df
-
-
 def ui_sidebar_pricing() -> Tuple[float, float, float, float]:
     st.sidebar.header("Параметры ценообразования")
     r_funds = st.sidebar.number_input("Стоимость фондирования r_funds", value=0.08, min_value=0.0, max_value=1.0, step=0.005, format="%.3f")
@@ -180,7 +45,7 @@ def ui_sidebar_pricing() -> Tuple[float, float, float, float]:
     return r_funds, lgd, rr, pricing_spread
 
 
-def ui_single_prediction(model: CatBoostClassifier, feature_names: List[str], cat_features: List[str], pricing_params: Tuple[float, float, float, float]):
+def ui_single_prediction(model: CatBoostClassifier, feature_names: List[str], cat_features: List[str], pricing_params: Tuple[float, float, float, float], top_placeholder):
     st.subheader("Одиночный расчёт")
 
     numeric_defaults = {
@@ -189,12 +54,34 @@ def ui_single_prediction(model: CatBoostClassifier, feature_names: List[str], ca
         "dependents": 0,
     }
 
-    # Базовые варианты для категориальных признаков, если их нет в обучающем датасете
+    # Статические справочники для категориальных признаков [[memory:3748319]]
     category_defaults = {
         "gender": ["Male", "Female"],
-        "education": ["Higher Education", "Secondary Education", "Other Education"],
-        "marital_status": ["Single", "Married"],
-        "district": ["Dushanbe", "Hissor", "Tursunzoda", "Vakhdat"],
+        "education": [
+            "Higher Education",
+            "Secondary Education",
+            "Incomplete Secondary Education",
+            "Other Education",
+            "Primary Education",
+            "No Education",
+        ],
+        "marital_status": ["Single", "Married", "Divorced", "Widowed"],
+        "district": [
+            "Dushanbe",
+            "Hissor",
+            "Tursunzoda",
+            "Vakhdat",
+            "Yovon",
+            "Panjakent",
+            "Kanibadam",
+            "Bobojon_Gafurov",
+            "Khujand",
+            "Istaravshan",
+            "Isfara",
+            "Kulob",
+            "Qurghonteppa",
+            "Rasht",
+        ],
     }
 
     inputs = {}
@@ -204,7 +91,6 @@ def ui_single_prediction(model: CatBoostClassifier, feature_names: List[str], ca
             continue
 
         if name in cat_features:
-            # Предлагаем список значений; если обучающий набор известен — можно расширить
             options = category_defaults.get(name, None)
             if options is None:
                 # Если неизвестны категории — оставляем текстовый ввод
@@ -229,60 +115,23 @@ def ui_single_prediction(model: CatBoostClassifier, feature_names: List[str], ca
         rate = compute_rate(proba, r_funds, lgd, rr, pricing_spread)
 
         st.success(f"PD: {proba:.4f}")
-        st.info(f"Ставка (годовая): {rate:.4f}")
-
-
-def ui_batch_prediction(model: CatBoostClassifier, feature_names: List[str], cat_features: List[str], pricing_params: Tuple[float, float, float, float]):
-    st.subheader("Пакетный расчёт")
-    uploaded = st.file_uploader("Загрузите CSV для расчёта (со столбцами признаков)", type=["csv"], key="batch")
-    if uploaded is None:
-        st.caption("Ожидается CSV с теми же признаками, что и у обученной модели.")
-        return
-
-    df = load_dataframe_from_bytes(uploaded.read())
-    missing = [c for c in feature_names if c not in df.columns]
-    if missing:
-        st.error(f"В CSV отсутствуют столбцы: {missing}")
-        return
-
-    # Приводим типы категориальных признаков к строкам
-    for c in cat_features:
-        if c in df.columns:
-            df[c] = df[c].astype(str)
-
-    proba = model.predict_proba(df[feature_names])[:, 1]
-    r_funds, lgd, rr, pricing_spread = pricing_params
-    rates = np.array([compute_rate(p, r_funds, lgd, rr, pricing_spread) for p in proba])
-
-    out = df.copy()
-    out["PD"] = proba
-    out["Rate"] = rates
-
-    st.dataframe(out.head(50))
-    csv = out.to_csv(index=False).encode("utf-8")
-    st.download_button("Скачать результаты (CSV)", data=csv, file_name="rates_output.csv", mime="text/csv")
+        # Большой акцент наверху: ставка в процентах
+        top_placeholder.markdown(
+            f"""
+            <div style='padding: 18px; background: #F0F7FF; border: 1px solid #CDE3FF; border-radius: 12px; text-align: center; margin-bottom: 12px;'>
+              <div style='font-size: 14px; color: #1D4ED8; font-weight: 600; letter-spacing: .3px;'>ПРОЦЕНТНАЯ СТАВКА</div>
+              <div style='font-size: 44px; font-weight: 800; color: #0F172A; line-height: 1.1; margin-top: 6px;'>{rate*100:.2f}%</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
 
-    df_raw = ui_sidebar_data()
     pricing_params = ui_sidebar_pricing()
-
-    if df_raw is None:
-        st.stop()
-
-    with st.expander("Первые строки исходных данных", expanded=False):
-        st.dataframe(df_raw.head())
-
-    try:
-        loans = clean_and_prepare_loans(df_raw)
-    except Exception as e:
-        st.error(f"Ошибка подготовки данных: {e}")
-        st.stop()
-
-    st.write(f"Размер выборки после подготовки: {loans.shape}")
 
     # Загрузка обученной модели из ноутбука
     model_path = os.path.join(os.path.dirname(__file__), "cb_dynamic_model.cbm")
@@ -299,13 +148,22 @@ def main():
     else:
         st.success("Загружена модель.")
 
-    tab_single, tab_batch, tab_info = st.tabs(["Одиночный расчёт", "Пакетный расчёт", "О модели"])
+    # Верхний акцентированный блок под заголовком для отображения процентной ставки
+    top_placeholder = st.empty()
+    top_placeholder.markdown(
+        """
+        <div style='padding: 18px; background: #F8FAFC; border: 1px dashed #E2E8F0; border-radius: 12px; text-align: center; margin-bottom: 12px;'>
+          <div style='font-size: 14px; color: #64748B; font-weight: 600; letter-spacing: .3px;'>ПРОЦЕНТНАЯ СТАВКА</div>
+          <div style='font-size: 32px; font-weight: 700; color: #334155; line-height: 1.1; margin-top: 6px;'>—</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_single, tab_info = st.tabs(["Одиночный расчёт", "О модели"])
 
     with tab_single:
-        ui_single_prediction(model, feature_names, cat_features, pricing_params)
-
-    with tab_batch:
-        ui_batch_prediction(model, feature_names, cat_features, pricing_params)
+        ui_single_prediction(model, feature_names, cat_features, pricing_params, top_placeholder)
 
     with tab_info:
         st.markdown("""
